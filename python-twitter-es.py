@@ -6,6 +6,49 @@ from textblob import TextBlob
 from elasticsearch import Elasticsearch
 from datetime import datetime
 import time
+import operator
+from collections import Counter
+import re
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+import string
+import unicodedata
+ 
+emoticons_str = r"""
+    (?:
+        [:=;] # Eyes
+        [oO\-]? # Nose (optional)
+        [D\)\]\(\]/\\OpP] # Mouth
+    )"""
+ 
+regex_str = [
+    emoticons_str,
+    r'<[^>]+>', # HTML tags
+    r'(?:@[\w_]+)', # @-mentions
+    r"(?:\#+[\w_]+[\w\'_\-]*[\w_]+)", # hash-tags
+    r'http[s]?://(?:[a-z]|[0-9]|[$-_@.&amp;+]|[!*\(\),]|(?:%[0-9a-f][0-9a-f]))+', # URLs
+ 
+    r'(?:(?:\d+,?)+(?:\.?\d+)?)', # numbers
+    r"(?:[a-z][a-z'\-_]+[a-z])", # words with - and '
+    r'(?:[\w_]+)', # other words
+    r'(?:\S)' # anything else
+]
+    
+tokens_re = re.compile(r'('+'|'.join(regex_str)+')', re.VERBOSE | re.IGNORECASE)
+emoticon_re = re.compile(r'^'+emoticons_str+'$', re.VERBOSE | re.IGNORECASE)
+ 
+def tokenize(s):
+    return tokens_re.findall(s)
+ 
+def preprocess(s, lowercase=False):
+    tokens = tokenize(s)
+    if lowercase:
+        tokens = [token if emoticon_re.search(token) else token.lower() for token in tokens]
+    return tokens
+
+def remove_accents(input_str):
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 # import twitter keys and tokens
 from config import *
@@ -13,7 +56,7 @@ from config import *
 # create instance of elasticsearch
 es = Elasticsearch()
 
-filtros = ['real madrid', 'barcelona']
+filtros = ['real madrid', 'atletico de madrid', 'champions']
 
 class TweetStreamListener(StreamListener):
 
@@ -24,9 +67,7 @@ class TweetStreamListener(StreamListener):
         dict_data = json.loads(data)
 
         # pass tweet into TextBlob
-        tweet = TextBlob(dict_data["text"])
-        #print(tweet.translate(to="es"))
-        #print(tweet.tags)
+        tweet = TextBlob(remove_accents(dict_data["text"].lower()))
 
         # output sentiment polarity
         print(tweet.sentiment.polarity)
@@ -46,11 +87,14 @@ class TweetStreamListener(StreamListener):
         if dict_data["coordinates"] != None:
             location = dict_data["coordinates"]["coordinates"]
 
-        #temp_tags = tweet.tags
-        #tags = [x for x,_ in temp_tags]
-
-        # add text and sentiment info to elasticsearch
-        #index= datetime.now().strftime("twitter-%Y.%m.%d"),
+        terms_all = [term for term in preprocess(remove_accents(dict_data["text"].lower()), True)]
+        punctuation = list(string.punctuation)
+        stop = stopwords.words('english') + stopwords.words("spanish") + punctuation + ['rt', 'RT', 'via', '...']
+        terms_hash = [term for term in preprocess(remove_accents(dict_data["text"].lower()), True) if term.startswith('#')]
+        terms_mentions = [term for term in preprocess(remove_accents(dict_data["text"].lower()), True) if term.startswith('@')]
+        terms_tags = [term for term in preprocess(remove_accents(dict_data["text"].lower()), True) if term not in stop and not term.startswith(('#', '@', 'http', '-', '...'))]
+        terms_urls = [term for term in preprocess(remove_accents(dict_data["text"].lower()), True) if term.startswith(('http'))]
+        
         es.index(index= "twitter",
                  doc_type="tweet",
                  body={"user id": dict_data["user"]["id"],
@@ -86,7 +130,10 @@ class TweetStreamListener(StreamListener):
                        "sentimiento": sentiment,
                        #"text traducido": tweet.translate(to="es"),
                        #"tags": tags,
-                       "tags": tweet.noun_phrases,
+                       "tags": terms_tags,
+                       "hastags": terms_hash,
+                       "urls": terms_urls,
+                       "mentions": terms_mentions,
                        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
                        }
                  )
